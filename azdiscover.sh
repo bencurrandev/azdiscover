@@ -145,8 +145,21 @@ RBAC_JQ='[.[] | select((.scope // "" | ascii_downcase) == $s)] | sort_by(.roleDe
 # Subscriptions in scope
 # ---------------------------------------------------------------------------
 
+# Query ARM live; 'az account list' reads a local cache that can contain stale/inaccessible subscriptions.
+fetch_subs() {
+  local url="/subscriptions?api-version=2022-12-01" page
+  while [[ -n "$url" ]]; do
+    if ! page=$(az rest --method get --url "$url" --only-show-errors -o json 2>>"$ERRLOG"); then
+      printf 'FAILED: az rest --url %s\n' "$url" >> "$ERRLOG"
+      break
+    fi
+    jq '.value // []' <<<"$page"
+    url=$(jq -r '.nextLink // empty' <<<"$page")
+  done | jq -s 'add // [] | map({id: .subscriptionId, name: .displayName, state, tenantId})'
+}
+
 log "Enumerating subscriptions"
-azj account list --all > "$WORK/subs_all.json"
+fetch_subs > "$WORK/subs_all.json"
 jq --arg t "$TENANT_ID" \
   '[.[] | select(.tenantId == $t and .state == "Enabled")] | sort_by(.name | ascii_downcase)' \
   "$WORK/subs_all.json" > "$WORK/subs.json"
@@ -372,7 +385,8 @@ for sub in "${SUB_IDS[@]}"; do
           .routingWeight, .expressRouteGatewayBypass, .provisioningState ]' \
     --slurpfile subs "$WORK/subs_all.json"
 
-  azj network express-route gateway list --subscription "$sub" > "$WORK/ergw.json"
+  azj network express-route gateway list --subscription "$sub" \
+    | jq 'if type == "array" then flatten(1) elif type == "object" then (.value // [.]) else [] end' > "$WORK/ergw.json"
   md "#### ExpressRoute Connections (Virtual WAN)" ""
   table "$WORK/ergw.json" "ER Gateway|Resource Group|Location|Virtual Hub|Connection|Circuit|Routing Weight|State" \
     'sort_by(.name) | .[] | .name as $g | .resourceGroup as $rg | .location as $l | (.virtualHub.id | lastseg) as $h
